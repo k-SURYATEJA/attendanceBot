@@ -191,9 +191,18 @@ class AttendanceScraper:
         current = (year_control.input_value(), sem_control.input_value())
         years = self._select_values(page, "#ContentPlaceHolder1_ddlYear")
         semesters = self._select_values(page, "#ContentPlaceHolder1_ddlsem")
-        terms = [(year, sem) for year in reversed(years) for sem in reversed(semesters)]
-        if current[0] and current[1] and current != ("0", "0"):
-            terms = [current] + [term for term in terms if term != current]
+
+        def safe_int(v: str) -> int:
+            try:
+                return int(v)
+            except ValueError:
+                return 0
+
+        # Sort years and semesters descending so highest/latest active term is tested first
+        sorted_years = sorted(years, key=safe_int, reverse=True)
+        sorted_semesters = sorted(semesters, key=safe_int, reverse=True)
+
+        terms = [(year, sem) for year in sorted_years for sem in sorted_semesters]
         return terms or [current]
 
     @staticmethod
@@ -211,17 +220,24 @@ class AttendanceScraper:
             return
         if year_control.input_value() != year:
             year_control.select_option(year)
-            page.wait_for_timeout(1_000)
-        if sem_control.input_value() != semester:
+            page.wait_for_timeout(1_500)
+            try:
+                page.wait_for_load_state("networkidle", timeout=5_000)
+            except Exception:
+                pass
+
+        sem_control = page.locator("#ContentPlaceHolder1_ddlsem")
+        if sem_control.count() > 0 and sem_control.input_value() != semester:
             sem_control.select_option(semester)
             page.wait_for_timeout(1_000)
 
     def _extract_attendance(self, page: Page) -> AttendanceSnapshot:
         body_text = self._body_text(page)
-        overall_match = re.search(r"Overall\(%\)\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*%", body_text)
-        if not overall_match:
-            self._screenshot(page, "overall-attendance-missing")
-            raise RuntimeError("Overall attendance percentage was not found")
+        overall_match = re.search(
+            r"(?:Overall|Total)\s*(?:\([^)]*\))?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*%",
+            body_text,
+            re.IGNORECASE,
+        )
 
         rows = page.locator("#ContentPlaceHolder1_gvStdHistory tr").evaluate_all(
             """
@@ -231,6 +247,18 @@ class AttendanceScraper:
             """
         )
         subjects = self._parse_subject_rows(rows)
+
+        total_conducted = sum(subject.classes_held for subject in subjects)
+        total_attended = sum(subject.classes_present for subject in subjects)
+
+        if overall_match:
+            overall_percentage = float(overall_match.group(1))
+        elif total_conducted > 0:
+            overall_percentage = round((total_attended / total_conducted) * 100, 2)
+        else:
+            self._screenshot(page, "overall-attendance-missing")
+            raise RuntimeError("Overall attendance percentage was not found")
+
         shortage_subjects = [
             subject.subject
             for subject in subjects
@@ -239,9 +267,9 @@ class AttendanceScraper:
 
         return AttendanceSnapshot(
             date=now_local().date().isoformat(),
-            overall_percentage=float(overall_match.group(1)),
-            total_classes_conducted=sum(subject.classes_held for subject in subjects),
-            classes_attended=sum(subject.classes_present for subject in subjects),
+            overall_percentage=overall_percentage,
+            total_classes_conducted=total_conducted,
+            classes_attended=total_attended,
             shortage_subjects=shortage_subjects,
             subjects=subjects,
         )
@@ -252,10 +280,16 @@ class AttendanceScraper:
 
         header = [cell.strip().lower() for cell in rows[0]]
         try:
-            subject_idx = self._header_index(header, "subject")
-            held_idx = self._header_index(header, "classes held")
-            present_idx = self._header_index(header, "classes present")
-            percent_idx = self._header_index(header, "attendance percentage")
+            subject_idx = self._find_header_index(header, ["subject", "course", "title"])
+            held_idx = self._find_header_index(
+                header, ["classes held", "held", "conducted", "total classes"]
+            )
+            present_idx = self._find_header_index(
+                header, ["classes present", "present", "attended"]
+            )
+            percent_idx = self._find_header_index(
+                header, ["attendance percentage", "percentage", "%", "att %"]
+            )
         except ValueError as exc:
             raise RuntimeError("Attendance table columns changed") from exc
 
@@ -266,22 +300,38 @@ class AttendanceScraper:
             subject = row[subject_idx].strip()
             if not subject:
                 continue
+
+            sub_lower = subject.lower()
+            if (
+                sub_lower in {"total", "overall", "average", "grand total", "total attendance"}
+                or sub_lower.startswith("total")
+            ):
+                continue
+
+            try:
+                held = int(float(row[held_idx]))
+                present = int(float(row[present_idx]))
+                percentage = self._parse_percentage(row[percent_idx])
+            except (ValueError, TypeError):
+                continue
+
             subjects.append(
                 SubjectAttendance(
                     subject=subject,
-                    classes_held=int(float(row[held_idx])),
-                    classes_present=int(float(row[present_idx])),
-                    percentage=self._parse_percentage(row[percent_idx]),
+                    classes_held=held,
+                    classes_present=present,
+                    percentage=percentage,
                 )
             )
         return subjects
 
     @staticmethod
-    def _header_index(header: list[str], expected: str) -> int:
-        for index, value in enumerate(header):
-            if expected in value:
-                return index
-        raise ValueError(expected)
+    def _find_header_index(header: list[str], keywords: list[str]) -> int:
+        for keyword in keywords:
+            for index, value in enumerate(header):
+                if keyword in value:
+                    return index
+        raise ValueError(f"Header matching any of {keywords} not found in {header}")
 
     @staticmethod
     def _parse_percentage(value: str) -> float:
