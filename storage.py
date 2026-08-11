@@ -1,0 +1,250 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from attendance_scraper import AttendanceSnapshot
+from config import BASE_DIR, HISTORY_PATH, REPORTS_DIR, now_local
+
+
+NOTIFICATION_HISTORY_PATH = BASE_DIR / "notification_history.json"
+
+
+def load_history() -> list[dict[str, Any]]:
+    if not HISTORY_PATH.exists():
+        return []
+    try:
+        data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def load_notification_history() -> list[dict[str, Any]]:
+    if not NOTIFICATION_HISTORY_PATH.exists():
+        return []
+    try:
+        data = json.loads(NOTIFICATION_HISTORY_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def scheduled_notification_sent_today(kind: str = "attendance") -> bool:
+    today = now_local().date().isoformat()
+    return any(
+        entry.get("date") == today and entry.get("kind") == kind
+        for entry in load_notification_history()
+    )
+
+
+def mark_scheduled_notification_sent(kind: str = "attendance") -> None:
+    history = load_notification_history()
+    if not isinstance(history, list):
+        history = []
+    today = now_local().date().isoformat()
+    history = [
+        entry
+        for entry in history
+        if isinstance(entry, dict) and not (entry.get("date") == today and entry.get("kind") == kind)
+    ]
+    history.append(
+        {
+            "date": today,
+            "kind": kind,
+            "sent_at": now_local().isoformat(timespec="seconds"),
+        }
+    )
+    NOTIFICATION_HISTORY_PATH.write_text(json.dumps(history, indent=2), encoding="utf-8")
+
+
+def save_daily_snapshot(snapshot: AttendanceSnapshot) -> list[dict[str, Any]]:
+    history = load_history()
+    if not isinstance(history, list):
+        history = []
+    record = snapshot.to_dict()
+    # Filter out None entries and match by date correctly
+    history = [entry for entry in history if isinstance(entry, dict) and entry.get("date") != snapshot.date]
+    history.append(record)
+    history.sort(key=lambda entry: entry.get("date", ""))
+    HISTORY_PATH.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    return history
+
+
+def previous_record(history: list[dict[str, Any]], current_date: str) -> dict[str, Any] | None:
+    earlier = [entry for entry in history if entry.get("date", "") < current_date]
+    if not earlier:
+        return None
+    return sorted(earlier, key=lambda entry: entry.get("date", ""))[-1]
+
+
+def compare_with_previous(
+    current: AttendanceSnapshot, previous: dict[str, Any] | None
+) -> dict[str, Any]:
+    if not previous:
+        return {"overall_delta": None, "subject_deltas": {}}
+
+    previous_overall = float(previous.get("overall_percentage", 0))
+    current_subjects = {subject.subject: subject for subject in current.subjects}
+    previous_subjects = {
+        item.get("subject"): float(item.get("percentage", 0))
+        for item in previous.get("subjects", [])
+    }
+    subject_deltas = {}
+    for subject, current_data in current_subjects.items():
+        if subject in previous_subjects:
+            subject_deltas[subject] = round(current_data.percentage - previous_subjects[subject], 2)
+
+    return {
+        "overall_delta": round(current.overall_percentage - previous_overall, 2),
+        "subject_deltas": subject_deltas,
+    }
+
+
+def generate_markdown_report(
+    snapshot: AttendanceSnapshot, comparison: dict[str, Any], threshold: float
+) -> Path:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    warnings = []
+    if snapshot.shortage_subjects:
+        warnings.append(
+            f"Subjects below {threshold:g}%: " + ", ".join(snapshot.shortage_subjects)
+        )
+
+    overall_delta = comparison.get("overall_delta")
+    if overall_delta is not None:
+        if overall_delta < 0:
+            warnings.append(f"Attendance dropped by {abs(overall_delta):.2f}%")
+        elif overall_delta > 0:
+            warnings.append(f"Attendance increased by {overall_delta:.2f}%")
+
+    lines = [
+        f"Date: {snapshot.date}",
+        "",
+        f"Overall Attendance: {snapshot.overall_percentage:.2f}%",
+        "",
+        f"Total Classes Conducted: {snapshot.total_classes_conducted}",
+        f"Classes Attended: {snapshot.classes_attended}",
+        "",
+        "Subject-wise:",
+    ]
+    for subject in snapshot.subjects:
+        lines.append(
+            f"- {subject.subject}: {subject.percentage:.1f}% "
+            f"({subject.classes_present}/{subject.classes_held})"
+        )
+
+    lines.extend(["", "Warnings:"])
+    if warnings:
+        lines.extend(f"- {warning}" for warning in warnings)
+    else:
+        lines.append("- No warnings")
+
+    lines.extend(["", f"Generated At: {now_local():%Y-%m-%d %H:%M:%S IST}"])
+    path = REPORTS_DIR / f"{snapshot.date}.md"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def generate_telegram_report(
+    snapshot: AttendanceSnapshot, comparison: dict[str, Any], threshold: float
+) -> str:
+    theory, labs = _split_subject_groups(snapshot)
+    generated_at = now_local().strftime("%I:%M %p - %b %d, %Y")
+
+    lines = [
+        "**\U0001f4ca Attendance Bot**",
+        "**Attendance Report**",
+        now_local().strftime("%B %d, %Y"),
+        "",
+        f"**Overall:** `{snapshot.overall_percentage:.2f}%`",
+        f"**Conducted:** `{snapshot.total_classes_conducted}`",
+        f"**Attended:** `{snapshot.classes_attended}`",
+        "",
+    ]
+
+    if theory:
+        lines.extend(["**THEORY**", *_format_subject_lines(theory), ""])
+    if labs:
+        lines.extend(["**LABS & OTHERS**", *_format_subject_lines(labs), ""])
+
+    if snapshot.shortage_subjects:
+        shortage = ", ".join(
+            f"{subject.subject} ({subject.percentage:.1f}%)"
+            for subject in snapshot.subjects
+            if subject.subject in snapshot.shortage_subjects
+        )
+        lines.append(f"\u26a0\ufe0f **Below {threshold:g}%:** {shortage}")
+
+    overall_delta = comparison.get("overall_delta")
+    if overall_delta is not None:
+        if overall_delta < 0:
+            lines.append(f"\U0001f53b **Attendance dropped:** {abs(overall_delta):.2f}%")
+        elif overall_delta > 0:
+            lines.append(f"\u2705 **Attendance increased:** {overall_delta:.2f}%")
+
+    lines.extend(["", f"*Generated at {generated_at} IST*"])
+    return "\n".join(lines)
+
+
+def generate_telegram_alert(snapshot: AttendanceSnapshot, threshold: float) -> str:
+    lines = [
+        "\U0001f6a8 **Attendance alert**",
+        "",
+        f"**Date:** {now_local().strftime('%B %d, %Y')}",
+        f"**Overall:** `{snapshot.overall_percentage:.2f}%`",
+    ]
+    if snapshot.shortage_subjects:
+        lines.append("")
+        for subject in snapshot.subjects:
+            if subject.subject in snapshot.shortage_subjects:
+                lines.append(
+                    f"\u26a0\ufe0f {subject.subject} is below {threshold:g}% "
+                    f"(`{subject.percentage:.1f}%`)"
+                )
+    return "\n".join(lines)
+
+
+def _split_subject_groups(
+    snapshot: AttendanceSnapshot,
+) -> tuple[list[Any], list[Any]]:
+    lab_keywords = ("lab", "association", "self learning", "tutorial")
+    theory = []
+    labs = []
+    for subject in snapshot.subjects:
+        target = labs if any(word in subject.subject.lower() for word in lab_keywords) else theory
+        target.append(subject)
+    return theory, labs
+
+
+def _format_subject_lines(subjects: list[Any]) -> list[str]:
+    return [
+        (
+            f"{_status_icon(subject.percentage)} "
+            f"{_shorten(subject.subject, 26)}\n"
+            f"`{_bar(subject.percentage)}` "
+            f"**{subject.percentage:.1f}%** "
+            f"`{subject.classes_present}/{subject.classes_held}`"
+        )
+        for subject in subjects
+    ]
+
+
+def _status_icon(percentage: float) -> str:
+    if percentage < 75:
+        return "\U0001f534"
+    if percentage >= 90:
+        return "\U0001f7e2"
+    return "\U0001f535"
+
+
+def _bar(percentage: float, width: int = 12) -> str:
+    filled = round(width * max(0, min(percentage, 100)) / 100)
+    return "\u2588" * filled + "\u2591" * (width - filled)
+
+
+def _shorten(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "\u2026"
