@@ -43,7 +43,12 @@ jobs:
         run: python -m playwright install --with-deps chromium
 
       - name: Run attendance check
-        run: python main.py --check-now --scheduled
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python main.py --check-now --scheduled
+          else
+            python main.py --check-now
+          fi
 
       - name: Persist attendance history and reports
         if: always()
