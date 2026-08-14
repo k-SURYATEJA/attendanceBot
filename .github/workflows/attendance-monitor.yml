@@ -2,11 +2,11 @@ name: Attendance Monitor
 
 on:
   schedule:
-    # 6:00 PM Asia/Kolkata is 12:30 PM UTC.
-    - cron: "30 12 * * *"
+    # 6:00 AM Asia/Kolkata is 12:30 AM UTC (00:30 UTC).
+    - cron: "30 0 * * *"
     # Backup runs. GitHub scheduled workflows may be delayed or occasionally dropped.
-    - cron: "40 12 * * *"
-    - cron: "55 12 * * *"
+    - cron: "40 0 * * *"
+    - cron: "55 0 * * *"
   workflow_dispatch:
 
 permissions:

@@ -118,6 +118,22 @@ class AttendanceScraper:
         history_url = self.settings.erp_url.rstrip("/") + "/Discipline/StudentHistory.aspx"
         self._load_with_retry(page, history_url)
         page.wait_for_timeout(1_500)
+
+        # 1. First try default active term pre-selected by ERP
+        try:
+            LOGGER.info("Attempting attendance extraction for default pre-selected active term")
+            self._click_attendance_button(page)
+            self._wait_for_attendance_data(page)
+            if self._has_complete_attendance_data(page):
+                LOGGER.info("Successfully loaded attendance data for default active term")
+                return
+            LOGGER.warning("Default term attendance load returned incomplete data; falling back")
+        except Exception as exc:
+            LOGGER.warning("Default term attendance load failed: %s. Falling back to term iterations", exc)
+
+        # 2. Fallback: reload page and iterate through available year/sem terms
+        self._load_with_retry(page, history_url)
+        page.wait_for_timeout(1_500)
         terms = self._available_terms(page)
         LOGGER.info("Found %s year/semester combinations to check", len(terms))
 

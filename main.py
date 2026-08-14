@@ -84,9 +84,9 @@ def run_check(scheduled: bool = False) -> None:
     logging.getLogger(__name__).info("Attendance check completed. Report: %s", report_path)
 
 
-def seconds_until_8_pm() -> float:
+def seconds_until_6_am() -> float:
     now = now_local()
-    target = datetime.combine(now.date(), day_time(hour=20, minute=0), tzinfo=now.tzinfo)
+    target = datetime.combine(now.date(), day_time(hour=6, minute=0), tzinfo=now.tzinfo)
     if now >= target:
         target += timedelta(days=1)
     return (target - now).total_seconds()
@@ -94,9 +94,9 @@ def seconds_until_8_pm() -> float:
 
 def run_scheduler() -> None:
     logger = logging.getLogger(__name__)
-    logger.info("Scheduler started. Attendance check runs daily at 8:00 PM.")
+    logger.info("Scheduler started. Attendance check runs daily at 6:00 AM.")
     while True:
-        sleep_for = seconds_until_8_pm()
+        sleep_for = seconds_until_6_am()
         logger.info("Next attendance check in %.0f seconds", sleep_for)
         time.sleep(sleep_for)
         try:
@@ -120,7 +120,7 @@ def install_windows_task() -> None:
             "/SC",
             "DAILY",
             "/ST",
-            "20:00",
+            "06:00",
             "/F",
         ],
         check=True,
