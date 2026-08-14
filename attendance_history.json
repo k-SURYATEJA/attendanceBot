@@ -5610,8 +5610,8 @@
   },
   {
     "date": "2026-08-14",
-    "overall_percentage": 83.7,
-    "total_classes_conducted": 227,
+    "overall_percentage": 82.61,
+    "total_classes_conducted": 230,
     "classes_attended": 190,
     "shortage_subjects": [
       "Data Mining Lab"
@@ -5685,9 +5685,9 @@
       },
       {
         "subject": "TUTORIAL",
-        "classes_held": 36,
+        "classes_held": 39,
         "classes_present": 32,
-        "percentage": 88.9
+        "percentage": 82.1
       }
     ]
   }
